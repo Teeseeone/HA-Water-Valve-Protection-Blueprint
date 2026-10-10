@@ -8,7 +8,7 @@ Two independent blueprints for a switch-controlled main water valve: **ON opens;
 
 [Import optional monthly test](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FTeeseeone%2FHA-Water-Valve-Protection-Blueprint%2Fblob%2Fmain%2Fblueprints%2Fwater_valve_monthly_test.yaml)
 
-Requires Home Assistant 2024.6 or newer. Importing alone does not create or enable an automation.
+Requires Home Assistant 2024.10 or newer. Importing alone does not create or enable an automation.
 
 ## Setup
 
@@ -53,6 +53,6 @@ IOTPerfect PF-PM02D-TYZ (`_TZE200_d0ypnbvn`) exposes switch state and fault in Z
 
 ## Validation
 
-YAML and blueprint input-reference checks are performed locally. Template guard regression tests cover dry/wet/unavailable sensors and lock/fault behavior. This has not been executed against a live Home Assistant instance or physical valve.
+YAML and blueprint input-reference checks are performed locally. Structural safety tests check that protection never opens the valve, scheduled tests default to disabled, both travel waits include interlocks, and faults cannot gate emergency closure. This has not been executed against a live Home Assistant instance or physical valve.
 
 Documentation: [Zigbee2MQTT PF-PM02D-TYZ](https://www.zigbee2mqtt.io/devices/PF-PM02D-TYZ.html).
