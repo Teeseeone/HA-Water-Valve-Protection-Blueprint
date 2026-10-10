@@ -1,0 +1,143 @@
+blueprint:
+  name: Water Valve Protection v1.0
+  description: >
+    Close an ON=open/OFF=closed switch valve on leaks. Select moisture sensors
+    directly or labels on devices/entities. Requires a persistent input_boolean
+    lock; manually reset it only after investigating. Never opens the valve.
+    Reported switch state does not verify physical closure.
+  domain: automation
+  source_url: https://github.com/Teeseeone/HA-Water-Valve-Protection-Blueprint/blob/main/blueprints/water_valve_protection.yaml
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    valve:
+      name: Water valve switch (ON = open)
+      selector:
+        entity:
+          filter:
+            domain: switch
+    lock:
+      name: Water shutoff lock helper
+      description: Create a Toggle helper. Do not configure a fixed initial state.
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    sensors:
+      name: Leak sensors
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+            device_class: moisture
+    labels:
+      name: Optional leak sensor labels
+      description: Labels on devices or entities; only moisture binary sensors are included.
+      default: []
+      selector:
+        label:
+          multiple: true
+    fault_sensor:
+      name: Optional actuator fault sensor
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+    fault_policy:
+      name: Fault handling
+      default: notify
+      selector:
+        select:
+          options:
+            - label: Notify only
+              value: notify
+            - label: Notify and block monthly testing
+              value: block
+            - label: Ignore
+              value: ignore
+    notify_actions:
+      name: Optional phone notification actions
+      description: Use "{{ valve_message }}" as the message in your notification action.
+      default: []
+      selector:
+        action: {}
+variables:
+  valve: !input valve
+  lock: !input lock
+  selected_sensors: !input sensors
+  selected_labels: !input labels
+  faults: !input fault_sensor
+  fault_policy: !input fault_policy
+  monitored: >-
+    {% set ns = namespace(ids=selected_sensors) %}
+    {% for label in selected_labels %}
+      {% set ns.ids = ns.ids + label_entities(label) %}
+      {% for device in label_devices(label) %}
+        {% set ns.ids = ns.ids + device_entities(device) %}
+      {% endfor %}
+    {% endfor %}
+    {{ ns.ids | unique | select('match', '^binary_sensor\\.') | select('in', states.binary_sensor | selectattr('attributes.device_class', 'eq', 'moisture') | map(attribute='entity_id') | list) | list }}
+triggers:
+  - trigger: time_pattern
+    seconds: "/5"
+    id: scan
+  - trigger: homeassistant
+    event: start
+    id: start
+conditions: []
+actions:
+  - variables:
+      wet: "{{ monitored | select('is_state', 'on') | list }}"
+      was_locked: "{{ is_state(lock, 'on') }}"
+  - if:
+      - condition: template
+        value_template: "{{ wet | count > 0 }}"
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input lock
+  - if:
+      - condition: template
+        value_template: "{{ is_state(lock, 'on') and not is_state(valve, 'off') }}"
+    then:
+      - action: switch.turn_off
+        continue_on_error: true
+        target:
+          entity_id: !input valve
+      - variables:
+          valve_message: >-
+            Water shutoff lock active. Close command sent to {{ valve }}.
+            Check water is physically shut off. Wet sensors: {{ wet | join(', ') }}.
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ this.entity_id ~ '_leak' }}"
+          title: Water valve shutoff
+          message: "{{ valve_message }}"
+  - if:
+      - condition: template
+        value_template: "{{ wet | count > 0 and not was_locked }}"
+    then:
+      - variables:
+          valve_message: "Leak detected: {{ wet | join(', ') }}. Shutoff lock enabled. Check water is physically shut off."
+      - sequence: !input notify_actions
+  - if:
+      - condition: template
+        value_template: "{{ fault_policy != 'ignore' and faults | select('is_state', 'on') | list | count > 0 }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ this.entity_id ~ '_fault' }}"
+          title: Water valve fault reported
+          message: >
+            Actuator fault reported. Physical position is not verified.
+            Leak close commands remain enabled. Inspect the actuator.
+    else:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: "{{ this.entity_id ~ '_fault' }}"
+mode: single
+max_exceeded: silent
