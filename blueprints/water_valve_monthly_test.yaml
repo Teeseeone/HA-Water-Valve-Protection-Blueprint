@@ -1,0 +1,223 @@
+blueprint:
+  name: Water Valve Monthly Timed Test v1.0
+  description: >
+    Optional monthly exercise for an ON=open/OFF=closed switch valve.
+    Disabled by default. No physical position verification. Use the SAME sensors,
+    labels, lock and fault settings as Water Valve Protection. Supervise the first
+    test. Restart/reload during a test may leave the valve closed; inspect manually.
+  domain: automation
+  source_url: https://github.com/Teeseeone/HA-Water-Valve-Protection-Blueprint/blob/main/blueprints/water_valve_monthly_test.yaml
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    valve:
+      name: Water valve switch (ON = open)
+      selector:
+        entity:
+          filter:
+            domain: switch
+    lock:
+      name: Same water shutoff lock helper
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    sensors:
+      name: Same leak sensors
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+            device_class: moisture
+    labels:
+      name: Same optional leak sensor labels
+      default: []
+      selector:
+        label:
+          multiple: true
+    faults:
+      name: Optional fault sensors
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+    fault_policy:
+      name: Fault handling
+      default: notify
+      selector:
+        select:
+          options:
+            - label: Notify only
+              value: notify
+            - label: Notify and block monthly testing
+              value: block
+            - label: Ignore
+              value: ignore
+    enabled:
+      name: Enable scheduled monthly test
+      default: false
+      selector:
+        boolean: {}
+    day:
+      name: Day of month
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 28
+          mode: box
+    time:
+      name: Test time (Home Assistant local time)
+      default: "12:00:00"
+      selector:
+        time: {}
+    travel:
+      name: Motor travel time in seconds
+      description: Set longer than the measured full travel time of your actuator.
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 120
+          unit_of_measurement: s
+          mode: box
+    hold:
+      name: Closed hold time in seconds
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: s
+          mode: box
+    notify_actions:
+      name: Optional test result notification actions
+      description: Use "{{ valve_message }}" as your notification message.
+      default: []
+      selector:
+        action: {}
+variables:
+  valve: !input valve
+  lock: !input lock
+  selected_sensors: !input sensors
+  selected_labels: !input labels
+  faults: !input faults
+  fault_policy: !input fault_policy
+  enabled: !input enabled
+  day: !input day
+  travel: !input travel
+  hold: !input hold
+  monitored: >-
+    {% set ns = namespace(ids=selected_sensors) %}
+    {% for label in selected_labels %}
+      {% set ns.ids = ns.ids + label_entities(label) %}
+      {% for device in label_devices(label) %}
+        {% set ns.ids = ns.ids + device_entities(device) %}
+      {% endfor %}
+    {% endfor %}
+    {{ ns.ids | unique | select('match', '^binary_sensor\\.') | select('in', states.binary_sensor | selectattr('attributes.device_class', 'eq', 'moisture') | map(attribute='entity_id') | list) | list }}
+triggers:
+  - trigger: time
+    at: !input time
+conditions:
+  - condition: template
+    value_template: "{{ enabled and now().day == day | int }}"
+actions:
+  - variables:
+      safe: >-
+        {{ monitored | count > 0
+           and monitored | reject('is_state', 'off') | list | count == 0
+           and is_state(lock, 'off')
+           and is_state(valve, 'on')
+           and (fault_policy != 'block' or faults | reject('is_state', 'off') | list | count == 0) }}
+  - if:
+      - condition: template
+        value_template: "{{ not safe }}"
+    then:
+      - variables:
+          valve_message: Monthly valve test skipped. Require an open valve, unlocked shutoff lock, at least one dry leak sensor, and no unavailable selected sensors.
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ this.entity_id ~ '_test' }}"
+          title: Water valve test skipped
+          message: "{{ valve_message }}"
+      - sequence: !input notify_actions
+      - stop: Preconditions not met
+  - action: switch.turn_off
+    target:
+      entity_id: !input valve
+  - wait_template: >-
+      {{ is_state(lock, 'on')
+         or monitored | reject('is_state', 'off') | list | count > 0
+         or not has_value(valve)
+         or (fault_policy == 'block' and faults | reject('is_state', 'off') | list | count > 0) }}
+    timeout:
+      seconds: "{{ travel | int + hold | int }}"
+    continue_on_timeout: true
+  - if:
+      - condition: template
+        value_template: >-
+          {{ wait.completed or not is_state(lock, 'off')
+             or monitored | reject('is_state', 'off') | list | count > 0
+             or not is_state(valve, 'off')
+             or (fault_policy == 'block' and faults | reject('is_state', 'off') | list | count > 0) }}
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input lock
+      - action: switch.turn_off
+        continue_on_error: true
+        target:
+          entity_id: !input valve
+      - variables:
+          valve_message: Valve test aborted. Shutoff lock enabled and close command sent. Inspect manually; no reopening was commanded.
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ this.entity_id ~ '_test' }}"
+          title: Water valve test aborted
+          message: "{{ valve_message }}"
+      - sequence: !input notify_actions
+      - stop: Test aborted
+  - action: switch.turn_on
+    target:
+      entity_id: !input valve
+  - wait_template: >-
+      {{ not is_state(lock, 'off')
+         or monitored | reject('is_state', 'off') | list | count > 0
+         or not has_value(valve)
+         or (fault_policy == 'block' and faults | reject('is_state', 'off') | list | count > 0) }}
+    timeout:
+      seconds: "{{ travel | int }}"
+    continue_on_timeout: true
+  - if:
+      - condition: template
+        value_template: "{{ wait.completed }}"
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input lock
+      - action: switch.turn_off
+        continue_on_error: true
+        target:
+          entity_id: !input valve
+  - variables:
+      valve_message: >-
+        {% if wait.completed %}
+          Test interrupted during reopening. Shutoff lock enabled; close command sent. Inspect manually.
+        {% elif not is_state(valve, 'on') %}
+          Open command sent but ON state was not reported. Inspect the valve manually.
+        {% else %}
+          Monthly test commands completed. Physical movement and water shutoff are not verified.
+        {% endif %}
+  - action: persistent_notification.create
+    data:
+      notification_id: "{{ this.entity_id ~ '_test' }}"
+      title: Water valve test result
+      message: "{{ valve_message }}"
+  - sequence: !input notify_actions
+mode: single
+max_exceeded: silent
